@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS users (
  id INTEGER PRIMARY KEY AUTOINCREMENT, student_id TEXT UNIQUE, name TEXT NOT NULL,
  email TEXT UNIQUE, department TEXT DEFAULT 'ECE', year INTEGER DEFAULT 2, class_name TEXT DEFAULT 'A',
  role TEXT NOT NULL DEFAULT 'student', password_hash TEXT NOT NULL,
- active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+ active INTEGER NOT NULL DEFAULT 1, must_change_password INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS departments (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL);
 CREATE TABLE IF NOT EXISTS classes (id INTEGER PRIMARY KEY AUTOINCREMENT, department TEXT NOT NULL, class_name TEXT NOT NULL, year INTEGER NOT NULL DEFAULT 2, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(department,class_name));
@@ -39,6 +39,9 @@ CREATE TABLE IF NOT EXISTS notices (
 );
 CREATE TABLE IF NOT EXISTS audit_logs (
  id INTEGER PRIMARY KEY AUTOINCREMENT, actor_id INTEGER, action TEXT NOT NULL, details TEXT DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS password_reset_requests (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, status TEXT NOT NULL DEFAULT 'pending', requested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, handled_at TEXT, handled_by INTEGER REFERENCES users(id)
 );
 '''
 
@@ -64,6 +67,7 @@ def init_db():
     # Safe migrations for databases created by earlier Nova builds.
     cols = {r[1] for r in conn.execute('PRAGMA table_info(users)').fetchall()}
     if 'class_name' not in cols: conn.execute("ALTER TABLE users ADD COLUMN class_name TEXT DEFAULT 'A'")
+    if 'must_change_password' not in cols: conn.execute('ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0')
     subject_cols = {r[1] for r in conn.execute('PRAGMA table_info(subjects)').fetchall()}
     if 'class_name' not in subject_cols: conn.execute("ALTER TABLE subjects ADD COLUMN class_name TEXT NOT NULL DEFAULT '*'")
     notice_cols = {r[1] for r in conn.execute('PRAGMA table_info(notices)').fetchall()}
@@ -110,6 +114,13 @@ def inject_globals():
     return {'csrf_token': session.get('csrf_token',''), 'current_user': getattr(g,'current_user',None), 'today': date.today().isoformat()}
 
 @app.before_request
+def enforce_forced_password_change():
+    if getattr(g, 'current_user', None) and g.current_user['role']=='student' and g.current_user['must_change_password']:
+        allowed = {'force_password_change', 'logout', 'static'}
+        if request.endpoint not in allowed:
+            return redirect(url_for('force_password_change'))
+
+@app.before_request
 def csrf_protect():
     if request.method == 'POST':
         supplied = request.form.get('csrf_token','')
@@ -143,10 +154,16 @@ def login():
     if request.method == 'POST':
         identifier = request.form.get('identifier','').strip()
         password = request.form.get('password','')
-        user = db().execute('SELECT * FROM users WHERE active=1 AND (email=? COLLATE NOCASE OR student_id=? COLLATE NOCASE)', (identifier.strip(),identifier.strip())).fetchone()
+        selected_role = request.form.get('login_role','student').strip().lower()
+        if selected_role not in ('admin','staff','student'):
+            flash('Choose Admin, Staff, or Student before signing in.','error')
+            return render_template('login.html')
+        user = db().execute('SELECT * FROM users WHERE active=1 AND role=? AND (email=? COLLATE NOCASE OR student_id=? COLLATE NOCASE)', (selected_role, identifier.strip(),identifier.strip())).fetchone()
         if user and check_password_hash(user['password_hash'],password):
             session.clear(); session['user_id']=user['id']; session['csrf_token']=secrets.token_urlsafe(24)
             log_action('login', f"Successful login: {user['name']}")
+            if user['role']=='student' and user['must_change_password']:
+                return redirect(url_for('force_password_change'))
             return redirect(url_for('admin_dashboard' if user['role']=='admin' else ('staff_dashboard' if user['role']=='staff' else 'student_dashboard')))
         flash('Invalid login details. Please try again.','error')
     return render_template('login.html')
@@ -342,12 +359,16 @@ def toggle_staff(user_id):
 def staff_dashboard():
     if g.current_user['role']=='admin': return redirect(url_for('admin_dashboard'))
     if g.current_user['role']!='staff': return redirect(url_for('student_dashboard'))
+    # Staff have no overview/dashboard; their landing page is attendance.
     return redirect(url_for('staff_group_attendance'))
 
 @app.route('/staff/students', methods=['GET','POST'])
 @login_required
 def staff_students_page():
-    if g.current_user['role']!='staff': return redirect(url_for('admin_dashboard' if g.current_user['role']=='admin' else 'student_dashboard'))
+    # Staff accounts intentionally have only attendance and announcements access.
+    if g.current_user['role']!='admin':
+        flash('Student management is available only to the dean/admin.','error')
+        return redirect(url_for('staff_group_attendance' if g.current_user['role']=='staff' else 'student_dashboard'))
     conn=db(); dept=g.current_user['department']; cls=g.current_user['class_name'] or 'A'
     if request.method=='POST':
         sid=request.form.get('student_id','').strip().upper(); name=request.form.get('name','').strip(); email=request.form.get('email','').strip().lower(); password=request.form.get('password','Student@123')
@@ -365,12 +386,20 @@ def staff_students_page():
 @app.route('/staff/attendance', methods=['GET','POST'])
 @login_required
 def staff_group_attendance():
-    """Fast class roll-call with roll-number range and four explicit statuses."""
+    """Staff can take sequential roll-call for any configured college class."""
     if g.current_user['role']!='staff':
         return redirect(url_for('admin_dashboard' if g.current_user['role']=='admin' else 'student_dashboard'))
-    conn=db(); dept=g.current_user['department']; cls=g.current_user['class_name'] or 'A'
-    all_students=conn.execute("SELECT id,student_id,name FROM users WHERE role='student' AND active=1 AND department=? AND class_name=? ORDER BY student_id COLLATE NOCASE",(dept,cls)).fetchall()
-    subjects=conn.execute("SELECT * FROM subjects WHERE department=? AND (class_name='*' OR class_name=?) ORDER BY code",(dept,cls)).fetchall()
+    conn=db()
+    classes=conn.execute('SELECT department,class_name,year FROM classes ORDER BY department,year,class_name').fetchall()
+    departments=conn.execute('SELECT name FROM departments ORDER BY name').fetchall()
+    selected_dept=(request.form.get('department') if request.method=='POST' else request.args.get('department')) or g.current_user['department'] or (departments[0]['name'] if departments else '')
+    selected_cls=(request.form.get('class_name') if request.method=='POST' else request.args.get('class_name')) or g.current_user['class_name'] or 'A'
+    class_exists=conn.execute('SELECT 1 FROM classes WHERE department=? AND class_name=?',(selected_dept,selected_cls)).fetchone()
+    if not class_exists:
+        selected_dept=g.current_user['department'] or (departments[0]['name'] if departments else '')
+        selected_cls=g.current_user['class_name'] or 'A'
+    subjects=conn.execute("SELECT * FROM subjects WHERE department=? AND (class_name='*' OR class_name=?) ORDER BY code",(selected_dept,selected_cls)).fetchall()
+    all_students=conn.execute("SELECT id,student_id,name FROM users WHERE role='student' AND active=1 AND department=? AND class_name=? ORDER BY student_id COLLATE NOCASE",(selected_dept,selected_cls)).fetchall()
     allowed_statuses={'Present','Absent','OD','Leave'}
     if request.method=='POST':
         try:
@@ -378,7 +407,8 @@ def staff_group_attendance():
             dt=request.form.get('attendance_date',date.today().isoformat())
             datetime.strptime(dt,'%Y-%m-%d')
             if dt > date.today().isoformat(): raise ValueError('future date')
-            subject=conn.execute("SELECT * FROM subjects WHERE id=? AND department=? AND (class_name='*' OR class_name=?)",(subject_id,dept,cls)).fetchone()
+            if not class_exists: raise ValueError('class')
+            subject=conn.execute("SELECT * FROM subjects WHERE id=? AND department=? AND (class_name='*' OR class_name=?)",(subject_id,selected_dept,selected_cls)).fetchone()
             if not subject: raise ValueError('subject')
             start_roll=request.form.get('roll_start','').strip(); end_roll=request.form.get('roll_end','').strip()
             roster=[r for r in all_students if (not start_roll or r['student_id'].casefold() >= start_roll.casefold()) and (not end_roll or r['student_id'].casefold() <= end_roll.casefold())]
@@ -392,16 +422,17 @@ def staff_group_attendance():
                     ON CONFLICT(user_id,subject_id,attendance_date) DO UPDATE SET status=excluded.status,marked_by=excluded.marked_by""",
                     (r['id'],subject_id,dt,status,g.current_user['id']))
                 counts[status]+=1
-            log_action('group_attendance_saved',f'{dept}/{cls}, subject={subject_id}, date={dt}, range={start_roll or "FIRST"}-{end_roll or "LAST"}, counts={counts}')
+            log_action('group_attendance_saved',f'{selected_dept}/{selected_cls}, subject={subject_id}, date={dt}, range={start_roll or "FIRST"}-{end_roll or "LAST"}, counts={counts}')
             conn.commit()
-            flash(f"Saved {len(roster)} records: {counts['Present']} present, {counts['Absent']} absent, {counts['OD']} OD, {counts['Leave']} leave.",'success')
+            flash(f"Saved {len(roster)} records for {selected_dept}/{selected_cls}: {counts['Present']} present, {counts['Absent']} absent, {counts['OD']} OD, {counts['Leave']} leave.",'success')
         except (ValueError,TypeError):
-            conn.rollback(); flash('Invalid subject, date, roll-number range or attendance status. No records were saved.','error')
-        return redirect(url_for('staff_group_attendance',roll_start=request.form.get('roll_start',''),roll_end=request.form.get('roll_end',''),subject_id=request.form.get('subject_id','')))
+            conn.rollback(); flash('Invalid department, class, subject, date, roll-number range or attendance status. No records were saved.','error')
+        return redirect(url_for('staff_group_attendance',department=selected_dept,class_name=selected_cls,roll_start=request.form.get('roll_start',''),roll_end=request.form.get('roll_end',''),subject_id=request.form.get('subject_id',''),attendance_date=request.form.get('attendance_date','')))
     start_roll=request.args.get('roll_start','').strip(); end_roll=request.args.get('roll_end','').strip()
     students=[r for r in all_students if (not start_roll or r['student_id'].casefold() >= start_roll.casefold()) and (not end_roll or r['student_id'].casefold() <= end_roll.casefold())]
     selected_subject=request.args.get('subject_id','')
-    return render_template('staff_attendance.html',students=students,all_students=all_students,subjects=subjects,department=dept,class_name=cls,roll_start=start_roll,roll_end=end_roll,selected_subject=selected_subject)
+    attendance_date=request.args.get('attendance_date',date.today().isoformat())
+    return render_template('staff_attendance.html',students=students,all_students=all_students,subjects=subjects,department=selected_dept,class_name=selected_cls,roll_start=start_roll,roll_end=end_roll,selected_subject=selected_subject,classes=classes,departments=departments,attendance_date=attendance_date)
 
 @app.route('/admin/notices', methods=['GET','POST'])
 @app.route('/staff/announcements', methods=['GET','POST'])
@@ -458,6 +489,63 @@ def audit_page():
     logs=db().execute('SELECT l.*,u.name actor FROM audit_logs l LEFT JOIN users u ON u.id=l.actor_id ORDER BY l.id DESC LIMIT 200').fetchall()
     return render_template('audit.html',logs=logs)
 
+@app.route('/forgot-password', methods=['GET','POST'])
+def forgot_password():
+    """Create an admin-reviewed reset request; never reset using ID/email alone."""
+    if request.method=='POST':
+        identifier=request.form.get('student_id','').strip()
+        email=request.form.get('email','').strip().lower()
+        user=db().execute("SELECT id FROM users WHERE role='student' AND active=1 AND student_id=? COLLATE NOCASE AND email=? COLLATE NOCASE",(identifier,email)).fetchone()
+        if user:
+            pending=db().execute("SELECT id FROM password_reset_requests WHERE user_id=? AND status='pending'",(user['id'],)).fetchone()
+            if not pending:
+                db().execute("INSERT INTO password_reset_requests(user_id) VALUES(?)",(user['id'],))
+                log_action('password_reset_requested',f'Student ID {identifier}')
+                db().commit()
+        flash('If the student ID and registered email match an active account, a reset request has been sent to the administrator for review.','success')
+        return redirect(url_for('forgot_password'))
+    return render_template('forgot_password.html')
+
+@app.route('/admin/password-resets', methods=['GET','POST'])
+@admin_required
+def password_resets_page():
+    conn=db()
+    if request.method=='POST':
+        request_id=request.form.get('request_id','')
+        req=conn.execute("SELECT r.*,u.student_id,u.name FROM password_reset_requests r JOIN users u ON u.id=r.user_id WHERE r.id=? AND r.status='pending' AND u.role='student'",(request_id,)).fetchone()
+        if not req:
+            flash('That reset request is no longer pending.','error')
+        else:
+            temporary=secrets.token_urlsafe(12)
+            conn.execute('UPDATE users SET password_hash=?,must_change_password=1 WHERE id=?',(generate_password_hash(temporary),req['user_id']))
+            conn.execute("UPDATE password_reset_requests SET status='approved',handled_at=CURRENT_TIMESTAMP,handled_by=? WHERE id=?",(g.current_user['id'],req['id']))
+            log_action('password_reset_issued',f"Temporary password issued for {req['student_id']}")
+            conn.commit()
+            flash(f"Temporary password for {req['student_id']} (show this to the student through a verified private channel): {temporary}",'success')
+        return redirect(url_for('password_resets_page'))
+    requests=conn.execute("SELECT r.*,u.student_id,u.name,u.email,u.department,u.class_name FROM password_reset_requests r JOIN users u ON u.id=r.user_id WHERE r.status='pending' ORDER BY r.requested_at",).fetchall()
+    return render_template('password_resets.html',requests=requests)
+
+@app.route('/student/force-password-change', methods=['GET','POST'])
+@login_required
+def force_password_change():
+    user=g.current_user
+    if user['role']!='student': return redirect(url_for('index'))
+    if request.method=='POST':
+        new=request.form.get('new_password',''); confirm=request.form.get('confirm_password','')
+        if len(new)<12 or not any(c.islower() for c in new) or not any(c.isupper() for c in new) or not any(c.isdigit() for c in new) or not any(not c.isalnum() for c in new):
+            flash('Use at least 12 characters with uppercase, lowercase, number and symbol.','error')
+        elif new!=confirm:
+            flash('Passwords do not match.','error')
+        elif check_password_hash(user['password_hash'],new):
+            flash('Choose a password different from the temporary password.','error')
+        else:
+            db().execute('UPDATE users SET password_hash=?,must_change_password=0 WHERE id=?',(generate_password_hash(new),user['id']))
+            log_action('password_changed_after_reset','Student changed temporary password')
+            db().commit(); flash('Password changed. You are now signed in securely.','success')
+            return redirect(url_for('student_dashboard'))
+    return render_template('force_password_change.html')
+
 @app.route('/student')
 @login_required
 def student_dashboard():
@@ -475,12 +563,15 @@ def student_dashboard():
 @login_required
 def profile_page():
     if g.current_user['role']=='admin': return redirect(url_for('admin_dashboard'))
+    if g.current_user['role']=='staff':
+        flash('Staff access is limited to Attendance and Announcements.','error')
+        return redirect(url_for('staff_group_attendance'))
     if request.method=='POST':
         old=request.form.get('current_password',''); new=request.form.get('new_password','')
         if not check_password_hash(g.current_user['password_hash'],old): flash('Current password is incorrect.','error')
-        elif len(new)<8: flash('New password must contain at least 8 characters.','error')
+        elif len(new)<12 or not any(c.islower() for c in new) or not any(c.isupper() for c in new) or not any(c.isdigit() for c in new) or not any(not c.isalnum() for c in new): flash('Use at least 12 characters with uppercase, lowercase, number and symbol.','error')
         else:
-            db().execute('UPDATE users SET password_hash=? WHERE id=?',(generate_password_hash(new),g.current_user['id'])); log_action('password_changed','Student changed password'); db().commit(); flash('Password changed successfully.','success')
+            db().execute('UPDATE users SET password_hash=?,must_change_password=0 WHERE id=?',(generate_password_hash(new),g.current_user['id'])); log_action('password_changed','Student changed password'); db().commit(); flash('Password changed successfully.','success')
         return redirect(url_for('profile_page'))
     return render_template('profile.html')
 
