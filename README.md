@@ -1,53 +1,64 @@
-# AttendancePro Nova — Fresh build
+# AttendancePro Nova — Faculty & Group Attendance Edition
 
-A new Flask + SQLite attendance application with a responsive dark violet campus dashboard inspired by the reference image. This is a fresh implementation and does not import the earlier app modules or database.
+A fresh Flask + SQLite attendance application with role-based access for the dean/administrator, staff, and students. The interface uses a dark futuristic campus dashboard style.
 
 ## Features
-- Separate admin and student sessions with hashed passwords
-- Admin overview with live metrics and database-driven attendance activity
-- Create/search student accounts and pause/reactivate access
-- Add and view subjects
-- Mark or update attendance per student + subject + date (Present, Absent, OD, Leave)
-- Attendance search and date filter; CSV export
-- Publish announcements visible on student dashboard
-- Recent activity/audit log
-- Student dashboard with personal attendance totals, subject-wise progress, history and announcements
-- Student password change
-- CSRF token validation on POST forms, session cookie protections, responsive layout
+- **Dean / admin:** create and pause staff accounts; assign each staff member a department and class/section; create students and subjects; view attendance; publish notices; export CSV; review audit logs.
+- **Staff:** see only their assigned department/class; add students within that assignment; take whole-class attendance with checkboxes (checked = Present, unchecked = Absent); save the entire roster at once. Subject selection is limited to the staff member's department.
+- **Students:** view their own attendance dashboard, subject totals, attendance history, announcements, and change password.
+- Passwords are stored as Werkzeug password hashes; forms use session CSRF tokens; changes are recorded in audit logs. SQLite database is created on first launch and `class_name` is added safely to an older Nova database.
 
-## Requirements
-- Python 3.10 or newer recommended
-- Windows / macOS / Linux
+## Setup (Windows PowerShell)
+Open this folder in VS Code, then run:
 
-## Run on Windows with VS Code
-1. Extract the ZIP and open this folder in VS Code.
-2. Open Terminal → New Terminal.
-3. Run:
-   ```powershell
-   python -m venv .venv
-   .\.venv\Scripts\Activate.ps1
-   python -m pip install -r requirements.txt
-   Copy-Item .env.example .env
-   python app.py
-   ```
-   If PowerShell blocks activation, run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` in that terminal and activate again.
-4. Visit `http://127.0.0.1:5000`.
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+Copy-Item .env.example .env
+python app.py
+```
 
-On macOS/Linux, activate with `source .venv/bin/activate` and copy `.env.example` to `.env`.
+If PowerShell blocks activation, run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` in the same terminal and retry activation. Use the same environment folder name (`.venv`) in all commands.
+
+Visit `http://127.0.0.1:5000`.
 
 ## First-run demo accounts
-- Admin email: `admin@attendancepro.local`
-- Admin password: `Admin@12345`
-- Student ID: `STU0001`
-- Student password: `Student@123`
+- Dean/admin: `admin@attendancepro.local` / `Admin@12345`
+- Demo student: `STU0001` / `Student@123`
 
-The app creates `attendancepro.db` automatically on first launch. Default demo credentials are for local development only. Change them before using real data. For the admin, set `ADMIN_PASSWORD` in `.env` **before the first run**. The initial admin is not automatically reset if the database already exists. Student demo password can similarly be set with `DEMO_STUDENT_PASSWORD` before first launch.
+No staff account is created by default. Sign in as admin, open **Staff & access**, create a staff ID, and assign a department and class/section. Then log in using that staff email and password.
 
-## Database behavior
-- SQLite stores student IDs, subjects, attendance, notices, and audit events in `attendancepro.db`.
-- Student ID and email are unique.
-- Re-marking attendance for the same student, subject and date updates the existing row.
-- Back up the database file regularly. Do not delete it unless you intend to reset all local records.
+Change demo passwords and set a strong random `SECRET_KEY` in `.env` before any non-local use. Do not commit `.env` or a live database to GitHub. These safeguards are a development baseline, not a claim of production certification; review deployment security, backups, and access policies before storing real college records.
 
-## Production notes
-This is a portfolio/local-development foundation, not a certified college information system. Before deployment: use a long random `SECRET_KEY`; change every demo password; configure HTTPS; use a production WSGI server; add rate limiting and account recovery; review authorization and privacy; test backups/restoration; and consider PostgreSQL for multi-user deployment. Avoid placing student personal data in a public repository. Use a production database and proper migration/backup practices before storing institution-wide data.
+## Quick roll-call workflow
+1. Dean creates a staff account and assigns department + class/section (e.g. ECE / A).
+2. Staff adds students to that assigned class with unique roll numbers/student IDs.
+3. Staff opens **Group attendance**, chooses the subject and starting/ending roll number, then selects **Load class & roll range**. Leave the range blank to load everyone in the assigned class.
+4. Each student row has a status: **Present**, **Absent**, **OD (On Duty)**, or **Leave**. Use **All Present**, **All Absent**, **All OD**, or **All Leave** for a fast bulk action, then adjust exceptions.
+5. Select the date, review the live totals and confirmation, and save once. Only students in the displayed roll-number range are saved. Saving the same student + subject + date updates that record rather than duplicating it.
+
+The staff member's department and class are enforced by the server and cannot be changed through the form. Subject choices are limited to the assigned department. Roll ranges use the student IDs' case-insensitive lexical order; keep roll-number formats consistent within a class (for example, `ECE001`, `ECE002`, `ECE003`).
+
+## Notes
+- Class section is a text value such as `A`, `B`, or `A1`; use the same value consistently.
+- Add subjects for each department from the admin **Subjects** page before taking attendance.
+- Run tests and verify all workflows before using the app for a whole college.
+
+## Dean class-wise attendance (updated)
+
+The administrator's **Attendance** page now uses a class register instead of the old one-student-at-a-time form:
+
+1. Choose a department.
+2. Choose a class/section (the options are drawn from the students assigned to that department).
+3. Choose a subject and date, then click **Load class register**.
+4. Every active student in that class is listed with roll number and name. Choose Present, Absent, OD, or Leave per student, or use a bulk status button and adjust exceptions.
+5. Review the summary and save the class in one action.
+
+The server re-queries the active roster by department and class, verifies the subject belongs to the selected department, rejects future dates, validates each status, and updates the unique student/subject/date record rather than duplicating it. Back up `attendancepro.db` before replacing a deployed codebase and test the workflow with demo records first.
+
+## Sequential one-student roll call
+
+The admin attendance page and staff Quick Roll Call now use a one-student-at-a-time flow. Select the department/class/subject/date (admin) or assigned subject and range (staff), then tap **Present**, **Absent**, **OD**, or **Leave**. The screen automatically advances to the next roll number. Use **Previous** to correct an earlier student. Keyboard shortcuts are `1` Present, `2` Absent, `3` OD, and `4` Leave. The save button stays disabled until every student in the selected roster/range has a status. Attendance is saved only when the user confirms the final summary.
+
+The server also rejects missing/invalid statuses rather than silently treating unmarked students as Present.

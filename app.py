@@ -16,10 +16,11 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS users (
  id INTEGER PRIMARY KEY AUTOINCREMENT, student_id TEXT UNIQUE, name TEXT NOT NULL,
- email TEXT UNIQUE, department TEXT DEFAULT 'ECE', year INTEGER DEFAULT 2,
+ email TEXT UNIQUE, department TEXT DEFAULT 'ECE', year INTEGER DEFAULT 2, class_name TEXT DEFAULT 'A',
  role TEXT NOT NULL DEFAULT 'student', password_hash TEXT NOT NULL,
  active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS departments (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL);
 CREATE TABLE IF NOT EXISTS subjects (
  id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT UNIQUE NOT NULL, name TEXT NOT NULL,
  department TEXT DEFAULT 'ECE', year INTEGER DEFAULT 2, faculty TEXT DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -59,6 +60,10 @@ def log_action(action, details=''):
 def init_db():
     conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row; conn.execute('PRAGMA foreign_keys=ON')
     conn.executescript(SCHEMA)
+    # Safe migrations for databases created by earlier Nova builds.
+    cols = {r[1] for r in conn.execute('PRAGMA table_info(users)').fetchall()}
+    if 'class_name' not in cols: conn.execute("ALTER TABLE users ADD COLUMN class_name TEXT DEFAULT 'A'")
+    for dep in ('ECE','CSE','EEE','IT','MECH','CIVIL','AI&DS'): conn.execute('INSERT OR IGNORE INTO departments(name) VALUES(?)',(dep,))
     if not conn.execute("SELECT id FROM users WHERE role='admin' LIMIT 1").fetchone():
         conn.execute('INSERT INTO users(student_id,name,email,department,year,role,password_hash) VALUES(NULL,?,?,?,?,?,?)',
             ('Administrator', 'admin@attendancepro.local', 'Administration', 0, 'admin', generate_password_hash(os.getenv('ADMIN_PASSWORD','Admin@12345'))))
@@ -108,7 +113,7 @@ def admin_required(fn):
 @app.route('/')
 def index():
     if getattr(g,'current_user',None):
-        return redirect(url_for('admin_dashboard' if g.current_user['role']=='admin' else 'student_dashboard'))
+        return redirect(url_for('admin_dashboard' if g.current_user['role']=='admin' else ('staff_dashboard' if g.current_user['role']=='staff' else 'student_dashboard')))
     return redirect(url_for('login'))
 
 @app.route('/login', methods=['GET','POST'])
@@ -120,7 +125,7 @@ def login():
         if user and check_password_hash(user['password_hash'],password):
             session.clear(); session['user_id']=user['id']; session['csrf_token']=secrets.token_urlsafe(24)
             log_action('login', f"Successful login: {user['name']}")
-            return redirect(url_for('admin_dashboard' if user['role']=='admin' else 'student_dashboard'))
+            return redirect(url_for('admin_dashboard' if user['role']=='admin' else ('staff_dashboard' if user['role']=='staff' else 'student_dashboard')))
         flash('Invalid login details. Please try again.','error')
     return render_template('login.html')
 
@@ -146,12 +151,12 @@ def admin_dashboard():
 def students_page():
     conn=db()
     if request.method=='POST':
-        sid=request.form.get('student_id','').strip().upper(); name=request.form.get('name','').strip(); email=request.form.get('email','').strip().lower(); dept=request.form.get('department','ECE').strip(); year=request.form.get('year','2'); password=request.form.get('password','Student@123')
+        sid=request.form.get('student_id','').strip().upper(); name=request.form.get('name','').strip(); email=request.form.get('email','').strip().lower(); dept=request.form.get('department','ECE').strip(); year=request.form.get('year','2'); class_name=request.form.get('class_name','A').strip().upper(); password=request.form.get('password','Student@123')
         if not sid or not name or not email or len(password)<8:
             flash('Enter student ID, name, email, and a password of at least 8 characters.','error')
         else:
             try:
-                conn.execute("INSERT INTO users(student_id,name,email,department,year,role,password_hash) VALUES(?,?,?,?,?,'student',?)",(sid,name,email,dept,int(year),generate_password_hash(password)))
+                conn.execute("INSERT INTO users(student_id,name,email,department,year,class_name,role,password_hash) VALUES(?,?,?,?,?,?,'student',?)",(sid,name,email,dept,int(year),class_name,generate_password_hash(password)))
                 log_action('student_created',f'{sid} · {name}'); conn.commit(); flash(f'Student {sid} created successfully.','success')
             except sqlite3.IntegrityError: conn.rollback(); flash('Student ID or email already exists.','error')
         return redirect(url_for('students_page'))
@@ -183,23 +188,150 @@ def subjects_page():
 @app.route('/admin/attendance', methods=['GET','POST'])
 @admin_required
 def attendance_page():
+    """Dean attendance workspace: select department/class/subject, then mark the whole roster."""
+    conn = db()
+    if request.method == 'POST':
+        try:
+            dept = request.form.get('department', '').strip()
+            cls = request.form.get('class_name', '').strip()
+            subject_id = int(request.form.get('subject_id', ''))
+            dt = request.form.get('attendance_date', date.today().isoformat())
+            datetime.strptime(dt, '%Y-%m-%d')
+            if dt > date.today().isoformat(): raise ValueError('future date')
+            subject = conn.execute('SELECT * FROM subjects WHERE id=? AND department=?', (subject_id, dept)).fetchone()
+            if not dept or not cls or not subject: raise ValueError('class or subject')
+            roster = conn.execute("SELECT id,student_id,name FROM users WHERE role='student' AND active=1 AND department=? AND class_name=? ORDER BY student_id COLLATE NOCASE", (dept, cls)).fetchall()
+            if not roster: raise ValueError('empty class')
+            allowed = {'Present', 'Absent', 'OD', 'Leave'}; counts = {status: 0 for status in allowed}
+            for student in roster:
+                status = request.form.get(f"status_{student['id']}", '')
+                if status not in allowed: raise ValueError('status')
+                note = request.form.get(f"note_{student['id']}", '').strip()[:250]
+                conn.execute("""INSERT INTO attendance(user_id,subject_id,attendance_date,status,note,marked_by) VALUES(?,?,?,?,?,?)
+                    ON CONFLICT(user_id,subject_id,attendance_date) DO UPDATE SET status=excluded.status,note=excluded.note,marked_by=excluded.marked_by""",
+                    (student['id'], subject_id, dt, status, note, g.current_user['id']))
+                counts[status] += 1
+            log_action('admin_class_attendance_saved', f'{dept}/{cls}, subject={subject_id}, date={dt}, counts={counts}')
+            conn.commit()
+            flash(f"Saved {len(roster)} students: {counts['Present']} present, {counts['Absent']} absent, {counts['OD']} OD, {counts['Leave']} leave.", 'success')
+            return redirect(url_for('attendance_page', department=dept, class_name=cls, subject_id=subject_id, attendance_date=dt))
+        except (ValueError, TypeError):
+            conn.rollback(); flash('Please choose a valid department, class, subject and date. No attendance was saved.', 'error')
+            return redirect(url_for('attendance_page'))
+    departments = conn.execute("SELECT DISTINCT department FROM users WHERE role='student' AND active=1 AND department IS NOT NULL AND department<>'' ORDER BY department").fetchall()
+    dept = request.args.get('department', (departments[0]['department'] if departments else '')).strip()
+    classes = conn.execute("SELECT DISTINCT class_name FROM users WHERE role='student' AND active=1 AND department=? ORDER BY class_name", (dept,)).fetchall() if dept else []
+    cls = request.args.get('class_name', (classes[0]['class_name'] if classes else '')).strip()
+    subjects = conn.execute('SELECT * FROM subjects WHERE department=? ORDER BY code', (dept,)).fetchall() if dept else []
+    selected_subject = request.args.get('subject_id', ''); dt = request.args.get('attendance_date', date.today().isoformat())
+    try: datetime.strptime(dt, '%Y-%m-%d')
+    except ValueError: dt = date.today().isoformat()
+    roster = conn.execute("""SELECT u.id,u.student_id,u.name,a.status,a.note FROM users u
+        LEFT JOIN attendance a ON a.user_id=u.id AND a.subject_id=? AND a.attendance_date=?
+        WHERE u.role='student' AND u.active=1 AND u.department=? AND u.class_name=?
+        ORDER BY u.student_id COLLATE NOCASE""", (int(selected_subject) if selected_subject.isdigit() else -1, dt, dept, cls)).fetchall() if dept and cls else []
+    q = request.args.get('q', '').strip(); filter_date = request.args.get('date', '')
+    sql = """SELECT a.*,u.name student_name,u.student_id,s.code subject_code,s.name subject_name,u.department,u.class_name FROM attendance a JOIN users u ON u.id=a.user_id JOIN subjects s ON s.id=a.subject_id WHERE (u.name LIKE ? OR u.student_id LIKE ? OR s.name LIKE ?)"""
+    args = [f'%{q}%', f'%{q}%', f'%{q}%']
+    if filter_date: sql += ' AND a.attendance_date=?'; args.append(filter_date)
+    sql += ' ORDER BY a.attendance_date DESC,a.id DESC LIMIT 300'
+    records = conn.execute(sql, args).fetchall()
+    return render_template('attendance.html', students=roster, subjects=subjects, records=records, q=q, filter_date=filter_date,
+        departments=departments, classes=classes, selected_department=dept, selected_class=cls, selected_subject=selected_subject, attendance_date=dt)
+
+
+@app.route('/admin/staff', methods=['GET','POST'])
+@admin_required
+def staff_page():
     conn=db()
     if request.method=='POST':
+        sid=request.form.get('staff_id','').strip().upper(); name=request.form.get('name','').strip(); email=request.form.get('email','').strip().lower(); dept=request.form.get('department','ECE').strip(); class_name=request.form.get('class_name','A').strip().upper(); password=request.form.get('password','')
+        if not sid or not name or not email or len(password)<10:
+            flash('Enter staff ID, name, email, and a password of at least 10 characters.','error')
+        else:
+            try:
+                conn.execute("INSERT INTO users(student_id,name,email,department,class_name,role,password_hash) VALUES(?,?,?,?,?,'staff',?)",(sid,name,email,dept,class_name,generate_password_hash(password)))
+                log_action('staff_created',f'{sid} · {name} · {dept}/{class_name}'); conn.commit(); flash(f'Staff account {sid} created.','success')
+            except sqlite3.IntegrityError: conn.rollback(); flash('Staff ID or email already exists.','error')
+        return redirect(url_for('staff_page'))
+    staff=conn.execute("SELECT * FROM users WHERE role='staff' ORDER BY active DESC,name").fetchall()
+    return render_template('staff.html',staff=staff)
+
+@app.route('/admin/staff/<int:user_id>/toggle', methods=['POST'])
+@admin_required
+def toggle_staff(user_id):
+    u=db().execute("SELECT * FROM users WHERE id=? AND role='staff'",(user_id,)).fetchone()
+    if u:
+        db().execute('UPDATE users SET active=? WHERE id=?',(0 if u['active'] else 1,user_id)); log_action('staff_status_changed',u['student_id']); db().commit(); flash('Staff access updated.','success')
+    return redirect(url_for('staff_page'))
+
+@app.route('/staff')
+@login_required
+def staff_dashboard():
+    if g.current_user['role']=='admin': return redirect(url_for('admin_dashboard'))
+    if g.current_user['role']!='staff': return redirect(url_for('student_dashboard'))
+    conn=db(); dept=g.current_user['department']; cls=g.current_user['class_name'] or 'A'
+    students=conn.execute("SELECT COUNT(*) FROM users WHERE role='student' AND active=1 AND department=? AND class_name=?",(dept,cls)).fetchone()[0]
+    today_count=conn.execute("SELECT COUNT(*) FROM attendance a JOIN users u ON u.id=a.user_id WHERE a.attendance_date=? AND u.department=? AND u.class_name=?",(date.today().isoformat(),dept,cls)).fetchone()[0]
+    return render_template('staff_dashboard.html',students=students,today_count=today_count)
+
+@app.route('/staff/students', methods=['GET','POST'])
+@login_required
+def staff_students_page():
+    if g.current_user['role']!='staff': return redirect(url_for('admin_dashboard' if g.current_user['role']=='admin' else 'student_dashboard'))
+    conn=db(); dept=g.current_user['department']; cls=g.current_user['class_name'] or 'A'
+    if request.method=='POST':
+        sid=request.form.get('student_id','').strip().upper(); name=request.form.get('name','').strip(); email=request.form.get('email','').strip().lower(); password=request.form.get('password','Student@123')
+        if not sid or not name or not email or len(password)<8: flash('Enter all fields and a password of at least 8 characters.','error')
+        else:
+            try:
+                conn.execute("INSERT INTO users(student_id,name,email,department,year,class_name,role,password_hash) VALUES(?,?,?,?,?,?, 'student',?)",(sid,name,email,dept,g.current_user['year'] or 2,cls,generate_password_hash(password)))
+                log_action('student_created_by_staff',f'{sid} · {dept}/{cls}'); conn.commit(); flash(f'Student {sid} added to {dept} / {cls}.','success')
+            except sqlite3.IntegrityError: conn.rollback(); flash('Student ID or email already exists.','error')
+        return redirect(url_for('staff_students_page'))
+    students=conn.execute("SELECT * FROM users WHERE role='student' AND department=? AND class_name=? ORDER BY student_id",(dept,cls)).fetchall()
+    return render_template('staff_students.html',students=students,department=dept,class_name=cls)
+
+@app.route('/staff/attendance', methods=['GET','POST'])
+@login_required
+def staff_group_attendance():
+    """Fast class roll-call with roll-number range and four explicit statuses."""
+    if g.current_user['role']!='staff':
+        return redirect(url_for('admin_dashboard' if g.current_user['role']=='admin' else 'student_dashboard'))
+    conn=db(); dept=g.current_user['department']; cls=g.current_user['class_name'] or 'A'
+    all_students=conn.execute("SELECT id,student_id,name FROM users WHERE role='student' AND active=1 AND department=? AND class_name=? ORDER BY student_id COLLATE NOCASE",(dept,cls)).fetchall()
+    subjects=conn.execute('SELECT * FROM subjects WHERE department=? ORDER BY code',(dept,)).fetchall()
+    allowed_statuses={'Present','Absent','OD','Leave'}
+    if request.method=='POST':
         try:
-            uid=int(request.form['user_id']); sid=int(request.form['subject_id']); dt=request.form.get('attendance_date',date.today().isoformat()); status=request.form['status']; note=request.form.get('note','').strip()
-            if status not in ('Present','Absent','OD','Leave'): raise ValueError()
-            conn.execute('''INSERT INTO attendance(user_id,subject_id,attendance_date,status,note,marked_by) VALUES(?,?,?,?,?,?) ON CONFLICT(user_id,subject_id,attendance_date) DO UPDATE SET status=excluded.status,note=excluded.note,marked_by=excluded.marked_by''',(uid,sid,dt,status,note,g.current_user['id']))
-            log_action('attendance_marked',f'user={uid}, subject={sid}, date={dt}, status={status}'); conn.commit(); flash('Attendance saved. Existing same-day entries are updated.','success')
-        except (ValueError,KeyError): conn.rollback(); flash('Please select a valid student, subject, date, and status.','error')
-        return redirect(url_for('attendance_page'))
-    students=conn.execute("SELECT id,student_id,name,department FROM users WHERE role='student' AND active=1 ORDER BY name").fetchall()
-    subjects=conn.execute('SELECT * FROM subjects ORDER BY code').fetchall()
-    q=request.args.get('q','').strip(); dt=request.args.get('date','')
-    sql='''SELECT a.*,u.name student_name,u.student_id,s.code subject_code,s.name subject_name FROM attendance a JOIN users u ON u.id=a.user_id JOIN subjects s ON s.id=a.subject_id WHERE (u.name LIKE ? OR u.student_id LIKE ? OR s.name LIKE ?)'''; args=[f'%{q}%',f'%{q}%',f'%{q}%']
-    if dt: sql+=' AND a.attendance_date=?'; args.append(dt)
-    sql+=' ORDER BY a.attendance_date DESC,a.id DESC LIMIT 300'
-    records=conn.execute(sql,args).fetchall()
-    return render_template('attendance.html',students=students,subjects=subjects,records=records,q=q,filter_date=dt)
+            subject_id=int(request.form.get('subject_id',''))
+            dt=request.form.get('attendance_date',date.today().isoformat())
+            datetime.strptime(dt,'%Y-%m-%d')
+            if dt > date.today().isoformat(): raise ValueError('future date')
+            subject=conn.execute('SELECT * FROM subjects WHERE id=? AND department=?',(subject_id,dept)).fetchone()
+            if not subject: raise ValueError('subject')
+            start_roll=request.form.get('roll_start','').strip(); end_roll=request.form.get('roll_end','').strip()
+            roster=[r for r in all_students if (not start_roll or r['student_id'].casefold() >= start_roll.casefold()) and (not end_roll or r['student_id'].casefold() <= end_roll.casefold())]
+            if start_roll and end_roll and start_roll.casefold()>end_roll.casefold(): raise ValueError('range')
+            if not roster: raise ValueError('empty roster')
+            counts={status:0 for status in allowed_statuses}
+            for r in roster:
+                status=request.form.get(f"status_{r['id']}",'')
+                if status not in allowed_statuses: raise ValueError('status')
+                conn.execute("""INSERT INTO attendance(user_id,subject_id,attendance_date,status,marked_by) VALUES(?,?,?,?,?)
+                    ON CONFLICT(user_id,subject_id,attendance_date) DO UPDATE SET status=excluded.status,marked_by=excluded.marked_by""",
+                    (r['id'],subject_id,dt,status,g.current_user['id']))
+                counts[status]+=1
+            log_action('group_attendance_saved',f'{dept}/{cls}, subject={subject_id}, date={dt}, range={start_roll or "FIRST"}-{end_roll or "LAST"}, counts={counts}')
+            conn.commit()
+            flash(f"Saved {len(roster)} records: {counts['Present']} present, {counts['Absent']} absent, {counts['OD']} OD, {counts['Leave']} leave.",'success')
+        except (ValueError,TypeError):
+            conn.rollback(); flash('Invalid subject, date, roll-number range or attendance status. No records were saved.','error')
+        return redirect(url_for('staff_group_attendance',roll_start=request.form.get('roll_start',''),roll_end=request.form.get('roll_end',''),subject_id=request.form.get('subject_id','')))
+    start_roll=request.args.get('roll_start','').strip(); end_roll=request.args.get('roll_end','').strip()
+    students=[r for r in all_students if (not start_roll or r['student_id'].casefold() >= start_roll.casefold()) and (not end_roll or r['student_id'].casefold() <= end_roll.casefold())]
+    selected_subject=request.args.get('subject_id','')
+    return render_template('staff_attendance.html',students=students,all_students=all_students,subjects=subjects,department=dept,class_name=cls,roll_start=start_roll,roll_end=end_roll,selected_subject=selected_subject)
 
 @app.route('/admin/notices', methods=['GET','POST'])
 @admin_required
@@ -232,6 +364,7 @@ def audit_page():
 @login_required
 def student_dashboard():
     if g.current_user['role']=='admin': return redirect(url_for('admin_dashboard'))
+    if g.current_user['role']=='staff': return redirect(url_for('staff_dashboard'))
     conn=db(); user_id=g.current_user['id']
     totals=conn.execute("SELECT COUNT(*) total,SUM(CASE WHEN status IN ('Present','OD') THEN 1 ELSE 0 END) attended FROM attendance WHERE user_id=?",(user_id,)).fetchone()
     total=totals['total'] or 0; attended=totals['attended'] or 0; percentage=round(attended*100/total) if total else 0
