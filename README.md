@@ -3,10 +3,14 @@
 A fresh Flask + SQLite attendance application with role-based access for the dean/administrator, staff, and students. The interface uses a dark futuristic campus dashboard style.
 
 ## Features
+- **Class management:** the dean creates each department/class/section in a dedicated Classes page before assigning staff, registering students, or creating class-specific subjects. Duplicate class names are allowed across different departments but not within the same department.
+- **Department/class subject scope:** class-specific subjects appear only for the matching department and class; shared subjects can be assigned to all classes in one department.
+- **Login fix:** student ID and email login is case-insensitive, so capitalization differences in the entered ID/email no longer cause a false invalid-login message. Passwords still must match.
+- **Staff workflow:** staff no longer see an overview page after login; they are sent directly to the attendance task.
 - **Dean / admin:** create and pause staff accounts; assign each staff member a department and class/section; create students and subjects; view attendance; publish notices; export CSV; review audit logs.
 - **Staff:** see only their assigned department/class; add students within that assignment; take whole-class attendance with checkboxes (checked = Present, unchecked = Absent); save the entire roster at once. Subject selection is limited to the staff member's department.
 - **Students:** view their own attendance dashboard, subject totals, attendance history, announcements, and change password.
-- Passwords are stored as Werkzeug password hashes; forms use session CSRF tokens; changes are recorded in audit logs. SQLite database is created on first launch and `class_name` is added safely to an older Nova database.
+- Passwords are stored as Werkzeug password hashes; forms use session CSRF tokens; changes are recorded in audit logs. SQLite database is created on first launch. A safe migration creates the class catalog and backfills it from existing student, staff, and subject records.
 
 ## Setup (Windows PowerShell)
 Open this folder in VS Code, then run:
@@ -27,7 +31,7 @@ Visit `http://127.0.0.1:5000`.
 - Dean/admin: `admin@attendancepro.local` / `Admin@12345`
 - Demo student: `STU0001` / `Student@123`
 
-No staff account is created by default. Sign in as admin, open **Staff & access**, create a staff ID, and assign a department and class/section. Then log in using that staff email and password.
+No staff account is created by default. Sign in as admin, open **Classes** and create the department/class first. Then open **Subjects** to assign subjects to the right department/class, register students, and open **Staff & access** to create a staff ID for that class. Then log in using that staff email and password.
 
 Change demo passwords and set a strong random `SECRET_KEY` in `.env` before any non-local use. Do not commit `.env` or a live database to GitHub. These safeguards are a development baseline, not a claim of production certification; review deployment security, backups, and access policies before storing real college records.
 
@@ -62,3 +66,10 @@ The server re-queries the active roster by department and class, verifies the su
 The admin attendance page and staff Quick Roll Call now use a one-student-at-a-time flow. Select the department/class/subject/date (admin) or assigned subject and range (staff), then tap **Present**, **Absent**, **OD**, or **Leave**. The screen automatically advances to the next roll number. Use **Previous** to correct an earlier student. Keyboard shortcuts are `1` Present, `2` Absent, `3` OD, and `4` Leave. The save button stays disabled until every student in the selected roster/range has a status. Attendance is saved only when the user confirms the final summary.
 
 The server also rejects missing/invalid statuses rather than silently treating unmarked students as Present.
+
+
+## Department/class subjects and timed event announcements
+- Subjects now support a class scope: all classes in a department or one particular class. Staff attendance lists only show subjects assigned to their department and class. Existing subjects migrate as department-wide (`*`).
+- Staff and the dean can publish events with a start and end date/time and target all students, one department, or one class. Staff targeting is server-validated: they can only target their assigned class/department, or all students.
+- Event announcements are automatically deleted after their end date/time on subsequent app requests; students only see events targeted to their department/class or all students.
+- Back up `attendancepro.db` before updating. Database migrations add the new subject scope and event fields automatically.
