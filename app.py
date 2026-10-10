@@ -180,7 +180,30 @@ def admin_dashboard():
     total_subjects=conn.execute('SELECT COUNT(*) FROM subjects').fetchone()[0]
     today_total=conn.execute('SELECT COUNT(*) FROM attendance WHERE attendance_date=?',(date.today().isoformat(),)).fetchone()[0]
     present=conn.execute("SELECT COUNT(*) FROM attendance WHERE attendance_date=? AND status='Present'",(date.today().isoformat(),)).fetchone()[0]
-    records=conn.execute('''SELECT a.*,u.name student_name,u.student_id,s.code subject_code,s.name subject_name FROM attendance a JOIN users u ON u.id=a.user_id JOIN subjects s ON s.id=a.subject_id ORDER BY attendance_date DESC,a.id DESC LIMIT 8''').fetchall()
+    # Show attendance sessions, not one row per student. Records saved together are
+    # summarized by teacher, class, subject, date and minute of creation.
+    records=conn.execute('''
+        SELECT COALESCE(m.name, 'Unknown staff') AS teacher_name,
+               COALESCE(u.department, '—') AS department,
+               COALESCE(u.year, 0) AS year,
+               COALESCE(u.class_name, '—') AS class_name,
+               s.code AS subject_code, s.name AS subject_name,
+               a.attendance_date AS attendance_date,
+               substr(a.created_at, 1, 16) AS marked_at,
+               COUNT(*) AS class_total,
+               SUM(CASE WHEN a.status='Present' THEN 1 ELSE 0 END) AS present_count,
+               SUM(CASE WHEN a.status='Absent' THEN 1 ELSE 0 END) AS absent_count,
+               SUM(CASE WHEN a.status='OD' THEN 1 ELSE 0 END) AS od_count,
+               SUM(CASE WHEN a.status='Leave' THEN 1 ELSE 0 END) AS leave_count
+        FROM attendance a
+        JOIN users u ON u.id=a.user_id
+        JOIN subjects s ON s.id=a.subject_id
+        LEFT JOIN users m ON m.id=a.marked_by
+        GROUP BY a.marked_by, u.department, u.year, u.class_name, a.subject_id,
+                 a.attendance_date, substr(a.created_at, 1, 16)
+        ORDER BY a.attendance_date DESC, marked_at DESC
+        LIMIT 8
+    ''').fetchall()
     students=conn.execute("SELECT * FROM users WHERE role='student' ORDER BY created_at DESC LIMIT 5").fetchall()
     month=conn.execute("SELECT substr(attendance_date,1,7) m, COUNT(*) total, SUM(CASE WHEN status='Present' THEN 1 ELSE 0 END) present FROM attendance WHERE attendance_date>=date('now','-5 months') GROUP BY m ORDER BY m").fetchall()
     return render_template('admin.html', total_students=total_students,total_subjects=total_subjects,today_total=today_total,present=present,records=records,students=students,month=month)
@@ -230,21 +253,59 @@ def delete_class(class_id):
 def students_page():
     conn=db()
     if request.method=='POST':
-        sid=request.form.get('student_id','').strip().upper(); name=request.form.get('name','').strip(); email=request.form.get('email','').strip().lower(); dept=request.form.get('department','ECE').strip(); year=request.form.get('year','2'); class_name=request.form.get('class_name','A').strip().upper(); password=request.form.get('password','Student@123')
-        if not sid or not name or not email or len(password)<8:
-            flash('Enter student ID, name, email, and a password of at least 8 characters.','error')
-        elif not conn.execute('SELECT 1 FROM classes WHERE department=? AND class_name=?',(dept,class_name)).fetchone():
-            flash('Create this department/class in the Classes page before registering students.','error')
+        sid=request.form.get('student_id','').strip().upper(); name=request.form.get('name','').strip(); email=request.form.get('email','').strip().lower(); dept=request.form.get('department','ECE').strip().upper(); year=request.form.get('year','2'); class_name=request.form.get('class_name','A').strip().upper(); password='1234567890'
+        try:
+            year_num=int(year)
+            if year_num not in (1,2,3,4): raise ValueError
+        except ValueError:
+            year_num=0
+        if not sid or not name or not email or year_num not in (1,2,3,4):
+            flash('Enter student ID, full name, valid email, and choose academic year 1–4. No account was created.','error')
         else:
-            try:
-                conn.execute("INSERT INTO users(student_id,name,email,department,year,class_name,role,password_hash) VALUES(?,?,?,?,?,?,'student',?)",(sid,name,email,dept,int(year),class_name,generate_password_hash(password)))
-                log_action('student_created',f'{sid} · {name}'); conn.commit(); flash(f'Student {sid} created successfully.','success')
-            except sqlite3.IntegrityError: conn.rollback(); flash('Student ID or email already exists.','error')
+            class_row=conn.execute('SELECT year FROM classes WHERE department=? AND class_name=?',(dept,class_name)).fetchone()
+            if not class_row:
+                flash('That department/class does not exist. Create it in Classes first. No account was created.','error')
+            elif int(class_row['year']) != year_num:
+                flash(f'Year mismatch: you selected Year {year_num}, but {dept} / {class_name} belongs to Year {class_row["year"]}. Select a matching class. No account was created.','error')
+            else:
+                try:
+                    conn.execute("INSERT INTO users(student_id,name,email,department,year,class_name,role,password_hash,must_change_password) VALUES(?,?,?,?,?,?,'student',?,1)",(sid,name,email,dept,year_num,class_name,generate_password_hash(password)))
+                    log_action('student_created',f'{sid} · {name} · {dept} Year {year_num} / {class_name}'); conn.commit(); flash(f'Student {sid} created. Initial password: 1234567890. Student must change it at first login.','success')
+                except sqlite3.IntegrityError: conn.rollback(); flash('Student ID or email already exists. No account was created.','error')
         return redirect(url_for('students_page'))
     q=request.args.get('q','').strip()
-    students=conn.execute("SELECT * FROM users WHERE role='student' AND (student_id LIKE ? OR name LIKE ? OR email LIKE ?) ORDER BY active DESC,name",(f'%{q}%',f'%{q}%',f'%{q}%')).fetchall()
+    dept_filter=request.args.get('department','').strip().upper()
+    year_filter=request.args.get('year','').strip()
+    where="role='student' AND (student_id LIKE ? OR name LIKE ? OR email LIKE ?)"
+    args=[f'%{q}%',f'%{q}%',f'%{q}%']
+    if dept_filter:
+        where += ' AND department=?'; args.append(dept_filter)
+    if year_filter in ('1','2','3','4'):
+        where += ' AND year=?'; args.append(int(year_filter))
+    class_filter=request.args.get('class_name','').strip().upper()
+    if class_filter:
+        where += ' AND class_name=?'; args.append(class_filter)
+    students=conn.execute(f"SELECT * FROM users WHERE {where} ORDER BY active DESC,name",args).fetchall()
     classes=conn.execute('SELECT * FROM classes ORDER BY department,year,class_name').fetchall()
-    return render_template('students.html',students=students,q=q,classes=classes)
+    departments=conn.execute('SELECT name FROM departments ORDER BY name').fetchall()
+    campus=conn.execute("SELECT department,year,class_name,COUNT(*) total FROM users WHERE role='student' GROUP BY department,year,class_name ORDER BY department,year,class_name").fetchall()
+    return render_template('students.html',students=students,q=q,classes=classes,departments=departments,campus=campus,dept_filter=dept_filter,year_filter=year_filter,class_filter=class_filter)
+
+@app.route('/admin/students/<int:user_id>/delete', methods=['POST'])
+@admin_required
+def delete_student(user_id):
+    conn=db()
+    student=conn.execute("SELECT * FROM users WHERE id=? AND role='student'",(user_id,)).fetchone()
+    if not student:
+        flash('Student account was not found.','error')
+    else:
+        sid=student['student_id']
+        # Foreign-key cascade removes attendance and pending reset requests for this account.
+        conn.execute('DELETE FROM users WHERE id=?',(user_id,))
+        log_action('student_deleted',f'{sid} · {student["name"]}')
+        conn.commit()
+        flash(f'Student {sid} and their linked attendance/reset-request records were deleted.','success')
+    return redirect(url_for('students_page'))
 
 @app.route('/admin/students/<int:user_id>/toggle', methods=['POST'])
 @admin_required
@@ -257,18 +318,77 @@ def toggle_student(user_id):
 @app.route('/admin/subjects', methods=['GET','POST'])
 @admin_required
 def subjects_page():
-    conn=db()
-    if request.method=='POST':
-        code=request.form.get('code','').strip().upper(); name=request.form.get('name','').strip(); dept=request.form.get('department','ECE').strip(); year=request.form.get('year','2'); faculty=request.form.get('faculty','').strip(); class_name=request.form.get('class_name','*').strip().upper() or '*'
+    conn = db()
+    if request.method == 'POST':
+        code = request.form.get('code', '').strip().upper()
+        name = request.form.get('name', '').strip()
+        dept = request.form.get('department', '').strip().upper()
+        year = request.form.get('year', '2')
+        faculty = request.form.get('faculty', '').strip()
+        class_name = request.form.get('class_name', '*').strip().upper() or '*'
         try:
-            if class_name != '*' and not conn.execute('SELECT 1 FROM classes WHERE department=? AND class_name=?',(dept,class_name)).fetchone():
-                raise ValueError('class')
-            conn.execute('INSERT INTO subjects(code,name,department,year,faculty,class_name) VALUES(?,?,?,?,?,?)',(code,name,dept,int(year),faculty,class_name)); log_action('subject_created',f'{code} · {name}'); conn.commit(); flash('Subject created.','success')
-        except (sqlite3.IntegrityError,ValueError): conn.rollback(); flash('Check the fields. Subject code must be unique.','error')
-        return redirect(url_for('subjects_page'))
-    subjects=conn.execute('SELECT s.*,COUNT(a.id) records FROM subjects s LEFT JOIN attendance a ON a.subject_id=s.id GROUP BY s.id ORDER BY s.department,s.class_name,s.code').fetchall()
-    classes=conn.execute('SELECT department,class_name,year FROM classes ORDER BY department,year,class_name').fetchall()
-    return render_template('subjects.html',subjects=subjects,classes=classes)
+            if not conn.execute('SELECT 1 FROM departments WHERE name=?', (dept,)).fetchone():
+                raise ValueError('department')
+            year_num = int(year)
+            if year_num not in (1, 2, 3, 4) or not code or not name:
+                raise ValueError('fields')
+            if class_name != '*':
+                class_row = conn.execute(
+                    'SELECT year FROM classes WHERE department=? AND class_name=?',
+                    (dept, class_name)
+                ).fetchone()
+                if not class_row:
+                    raise ValueError('class')
+                if int(class_row['year']) != year_num:
+                    raise ValueError('year')
+            conn.execute(
+                'INSERT INTO subjects(code,name,department,year,faculty,class_name) VALUES(?,?,?,?,?,?)',
+                (code, name, dept, year_num, faculty, class_name)
+            )
+            log_action('subject_created', f'{code} · {name} · {dept}')
+            conn.commit()
+            flash(f'Subject {code} added to {dept}.', 'success')
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            flash('Subject code must be unique. No subject was added.', 'error')
+        except (ValueError, TypeError):
+            conn.rollback()
+            flash('Check the department, year, and class. The selected class must belong to the department and year.', 'error')
+        return redirect(url_for('subjects_page', department=dept))
+
+    departments = conn.execute('''
+        SELECT d.name, COUNT(DISTINCT s.id) AS subject_count
+        FROM departments d
+        LEFT JOIN subjects s ON s.department = d.name
+        GROUP BY d.id, d.name
+        ORDER BY d.name
+    ''').fetchall()
+    selected_department = request.args.get('department', '').strip().upper()
+    department_names = {row['name'] for row in departments}
+    if selected_department not in department_names:
+        selected_department = ''
+    subjects = []
+    classes = []
+    if selected_department:
+        subjects = conn.execute('''
+            SELECT s.*, COUNT(a.id) AS records
+            FROM subjects s
+            LEFT JOIN attendance a ON a.subject_id = s.id
+            WHERE s.department = ?
+            GROUP BY s.id
+            ORDER BY s.year, s.class_name, s.code
+        ''', (selected_department,)).fetchall()
+        classes = conn.execute(
+            'SELECT department,class_name,year FROM classes WHERE department=? ORDER BY year,class_name',
+            (selected_department,)
+        ).fetchall()
+    all_classes = conn.execute(
+        'SELECT department,class_name,year FROM classes ORDER BY department,year,class_name'
+    ).fetchall()
+    return render_template(
+        'subjects.html', subjects=subjects, departments=departments,
+        selected_department=selected_department, classes=classes, all_classes=all_classes
+    )
 
 @app.route('/admin/attendance', methods=['GET','POST'])
 @admin_required
@@ -316,13 +436,38 @@ def attendance_page():
         WHERE u.role='student' AND u.active=1 AND u.department=? AND u.class_name=?
         ORDER BY u.student_id COLLATE NOCASE""", (int(selected_subject) if selected_subject.isdigit() else -1, dt, dept, cls)).fetchall() if dept and cls else []
     q = request.args.get('q', '').strip(); filter_date = request.args.get('date', '')
-    sql = """SELECT a.*,u.name student_name,u.student_id,s.code subject_code,s.name subject_name,u.department,u.class_name FROM attendance a JOIN users u ON u.id=a.user_id JOIN subjects s ON s.id=a.subject_id WHERE (u.name LIKE ? OR u.student_id LIKE ? OR s.name LIKE ?)"""
-    args = [f'%{q}%', f'%{q}%', f'%{q}%']
-    if filter_date: sql += ' AND a.attendance_date=?'; args.append(filter_date)
-    sql += ' ORDER BY a.attendance_date DESC,a.id DESC LIMIT 300'
-    records = conn.execute(sql, args).fetchall()
+    # The recent register summarizes a saved attendance session instead of exposing
+    # a row for every student. Session grouping uses the teacher, class, subject,
+    # attendance date, and creation minute shared by the bulk save.
+    total_college_students = conn.execute("SELECT COUNT(*) FROM users WHERE role='student' AND active=1").fetchone()[0]
+    today = date.today().isoformat()
+    today_counts = conn.execute("""SELECT
+        SUM(CASE WHEN status='Present' THEN 1 ELSE 0 END) AS present_count,
+        SUM(CASE WHEN status='Absent' THEN 1 ELSE 0 END) AS absent_count,
+        COUNT(*) AS marked_count
+        FROM attendance WHERE attendance_date=?""", (today,)).fetchone()
+    sql = """SELECT COALESCE(m.name,'Unknown staff') AS teacher_name,
+        u.department, u.year, u.class_name, s.code AS subject_code, s.name AS subject_name,
+        a.attendance_date, substr(a.created_at,1,16) AS marked_at,
+        COUNT(*) AS class_total,
+        SUM(CASE WHEN a.status='Present' THEN 1 ELSE 0 END) AS present_count,
+        SUM(CASE WHEN a.status='Absent' THEN 1 ELSE 0 END) AS absent_count,
+        SUM(CASE WHEN a.status='OD' THEN 1 ELSE 0 END) AS od_count,
+        SUM(CASE WHEN a.status='Leave' THEN 1 ELSE 0 END) AS leave_count
+        FROM attendance a
+        JOIN users u ON u.id=a.user_id
+        JOIN subjects s ON s.id=a.subject_id
+        LEFT JOIN users m ON m.id=a.marked_by
+        WHERE (?='' OR m.name LIKE ? OR u.department LIKE ? OR u.class_name LIKE ? OR s.code LIKE ? OR s.name LIKE ?)
+        AND (?='' OR a.attendance_date=?)
+        GROUP BY a.marked_by,u.department,u.year,u.class_name,a.subject_id,a.attendance_date,substr(a.created_at,1,16)
+        ORDER BY a.attendance_date DESC, marked_at DESC LIMIT 100"""
+    like = f'%{q}%'
+    records = conn.execute(sql, (q, like, like, like, like, like, filter_date, filter_date)).fetchall()
     return render_template('attendance.html', students=roster, subjects=subjects, records=records, q=q, filter_date=filter_date,
-        departments=departments, classes=classes, selected_department=dept, selected_class=cls, selected_subject=selected_subject, attendance_date=dt)
+        departments=departments, classes=classes, selected_department=dept, selected_class=cls, selected_subject=selected_subject, attendance_date=dt,
+        total_college_students=total_college_students, today_present=today_counts['present_count'] or 0,
+        today_absent=today_counts['absent_count'] or 0, today_marked=today_counts['marked_count'] or 0)
 
 
 @app.route('/admin/staff', methods=['GET','POST'])
@@ -410,9 +555,7 @@ def staff_group_attendance():
             if not class_exists: raise ValueError('class')
             subject=conn.execute("SELECT * FROM subjects WHERE id=? AND department=? AND (class_name='*' OR class_name=?)",(subject_id,selected_dept,selected_cls)).fetchone()
             if not subject: raise ValueError('subject')
-            start_roll=request.form.get('roll_start','').strip(); end_roll=request.form.get('roll_end','').strip()
-            roster=[r for r in all_students if (not start_roll or r['student_id'].casefold() >= start_roll.casefold()) and (not end_roll or r['student_id'].casefold() <= end_roll.casefold())]
-            if start_roll and end_roll and start_roll.casefold()>end_roll.casefold(): raise ValueError('range')
+            roster=all_students
             if not roster: raise ValueError('empty roster')
             counts={status:0 for status in allowed_statuses}
             for r in roster:
@@ -422,17 +565,16 @@ def staff_group_attendance():
                     ON CONFLICT(user_id,subject_id,attendance_date) DO UPDATE SET status=excluded.status,marked_by=excluded.marked_by""",
                     (r['id'],subject_id,dt,status,g.current_user['id']))
                 counts[status]+=1
-            log_action('group_attendance_saved',f'{selected_dept}/{selected_cls}, subject={subject_id}, date={dt}, range={start_roll or "FIRST"}-{end_roll or "LAST"}, counts={counts}')
+            log_action('group_attendance_saved',f'{selected_dept}/{selected_cls}, subject={subject_id}, date={dt}, students={len(roster)}, counts={counts}')
             conn.commit()
             flash(f"Saved {len(roster)} records for {selected_dept}/{selected_cls}: {counts['Present']} present, {counts['Absent']} absent, {counts['OD']} OD, {counts['Leave']} leave.",'success')
         except (ValueError,TypeError):
             conn.rollback(); flash('Invalid department, class, subject, date, roll-number range or attendance status. No records were saved.','error')
-        return redirect(url_for('staff_group_attendance',department=selected_dept,class_name=selected_cls,roll_start=request.form.get('roll_start',''),roll_end=request.form.get('roll_end',''),subject_id=request.form.get('subject_id',''),attendance_date=request.form.get('attendance_date','')))
-    start_roll=request.args.get('roll_start','').strip(); end_roll=request.args.get('roll_end','').strip()
-    students=[r for r in all_students if (not start_roll or r['student_id'].casefold() >= start_roll.casefold()) and (not end_roll or r['student_id'].casefold() <= end_roll.casefold())]
+        return redirect(url_for('staff_group_attendance',department=selected_dept,class_name=selected_cls,subject_id=request.form.get('subject_id',''),attendance_date=request.form.get('attendance_date','')))
+    students=all_students
     selected_subject=request.args.get('subject_id','')
     attendance_date=request.args.get('attendance_date',date.today().isoformat())
-    return render_template('staff_attendance.html',students=students,all_students=all_students,subjects=subjects,department=selected_dept,class_name=selected_cls,roll_start=start_roll,roll_end=end_roll,selected_subject=selected_subject,classes=classes,departments=departments,attendance_date=attendance_date)
+    return render_template('staff_attendance.html',students=students,all_students=all_students,subjects=subjects,department=selected_dept,class_name=selected_cls,selected_subject=selected_subject,classes=classes,departments=departments,attendance_date=attendance_date)
 
 @app.route('/admin/notices', methods=['GET','POST'])
 @app.route('/staff/announcements', methods=['GET','POST'])
@@ -580,4 +722,4 @@ def not_found(_): return render_template('error.html',code=404,message='This pag
 
 if __name__ == '__main__':
     init_db()
-    app.run(host='127.0.0.1', port=int(os.getenv('PORT','5000')), debug=os.getenv('FLASK_DEBUG','0')=='1')
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', '5000')), debug=False)

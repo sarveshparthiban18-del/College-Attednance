@@ -85,3 +85,17 @@ The server also rejects missing/invalid statuses rather than silently treating u
 - Admin opens **Password reset requests**, verifies the student's identity using an approved college channel, then issues a one-time temporary password. The temporary password is shown once in the admin success message and must be delivered privately after identity verification.
 - The student signs in using the temporary password and is forced to set a new password (12+ characters with uppercase, lowercase, number, and symbol) before accessing the app. Students who remember their current password can change it in My Profile.
 - Reset request approval is audited. Do not send temporary passwords in public groups or expose them in screenshots. Configure verified email OTP delivery before offering unattended self-service password resets.
+
+## Student directory improvements
+- Admin can browse Campus Records by department and academic year to see student IDs and account status.
+- Admin can permanently delete a student account. The linked attendance and password-reset request records are removed by SQLite foreign-key cascades; this action cannot be undone.
+- Student creation validates department + class + academic year on the server. A mismatched year/class is rejected with a warning and no account is created.
+- New student accounts use the shared initial password `1234567890` and are required to change it at first login. Share initial passwords privately and change this policy before using real campus data.
+
+
+## Department-first Subject Library (updated)
+- The Subjects page opens with department cards and subject counts.
+- Selecting a department opens only that department's subjects, with a link back to all departments.
+- Course Setup explicitly asks for the department, year, and class visibility.
+- Class choices are filtered by the selected department and year; the server validates department, year, and class before saving.
+- Existing subject IDs and attendance links are preserved. No database reset is required; the existing database is migrated by the app as before.

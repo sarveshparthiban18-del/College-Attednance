@@ -13,3 +13,99 @@
 .role-option b{display:block;font-size:11px;color:#f3f0fb;padding-right:9px}
 .role-option small{display:block;font-size:9px;line-height:1.45;color:#9690aa;margin-top:4px}
 @media(max-width:440px){.role-picker{gap:5px}.role-option{padding:10px 7px}.role-option b{font-size:10px}.role-option small{font-size:8px}}
+
+/* Department-first subject catalog */
+.subjects-layout{grid-template-columns:minmax(270px,.72fr) minmax(0,1.5fr)}
+.catalog-subtitle{color:var(--muted);font-size:11px;line-height:1.6;margin:-8px 0 18px}
+.catalog-title-row{align-items:flex-start}
+.catalog-title-row .btn{font-size:10px}
+.department-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.department-card{display:flex;align-items:center;gap:11px;min-width:0;padding:15px 13px;border:1px solid var(--line);border-radius:14px;background:linear-gradient(140deg,#ffffff07,#ffffff02);transition:transform .18s,border-color .18s,background .18s}
+.department-card:hover{transform:translateY(-2px);border-color:#a985ff65;background:#a985ff0a}
+.department-card-icon{width:38px;height:38px;border-radius:11px;display:grid;place-items:center;font-size:19px;flex-shrink:0}
+.department-card-copy{display:block;min-width:0;flex:1}
+.department-card-copy strong,.department-card-copy small{display:block;overflow:hidden;text-overflow:ellipsis}
+.department-card-copy strong{font-family:'Space Grotesk',sans-serif;font-size:13px}
+.department-card-copy small{font-size:9px;color:var(--muted);margin-top:4px;white-space:nowrap}
+.department-card-count{font-size:9px;color:#aaa6bc;white-space:nowrap}
+.department-card-arrow{color:var(--violet);font-size:16px}
+@media(max-width:1050px){.subjects-layout{grid-template-columns:1fr}.department-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:620px){.department-grid{grid-template-columns:1fr}.department-card{padding:13px}.department-card-count{font-size:8px}.catalog-title-row{flex-direction:column}}
+
+/* Global theme switch: persisted by app.js and available on every role/page. */
+.theme-toggle{display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid var(--line);border-radius:999px;padding:8px 11px;background:var(--panel2);color:var(--text);font:600 10px 'DM Sans',sans-serif;cursor:pointer;white-space:nowrap;transition:background .2s,border-color .2s}
+.theme-toggle:hover{border-color:var(--violet);transform:translateY(-1px)}
+.theme-toggle-icon{font-size:14px;line-height:1}
+.auth-theme-toggle{position:fixed;top:16px;right:18px;z-index:20}
+
+/* Student attendance odometer / gauge replaces the old horizontal line. */
+.student-hero{gap:24px}
+.student-hero-copy{min-width:0;max-width:520px;flex:1}
+.student-hero-copy p{margin:14px 0 10px;line-height:1.7}
+.attendance-odometer{width:174px;height:174px;flex:0 0 174px;position:relative;border-radius:50%;display:grid;place-items:center;background:conic-gradient(from -90deg,var(--mint) 0 var(--attendance-value),rgba(150,145,170,.19) var(--attendance-value) 100%);filter:drop-shadow(0 8px 24px #0002)}
+.attendance-odometer:before{content:'';position:absolute;inset:9px;border-radius:50%;background:var(--panel);border:1px solid var(--line);box-shadow:inset 0 0 0 7px rgba(120,110,150,.07)}
+.odometer-track{position:absolute;inset:18px;border-radius:50%;display:grid;place-items:center;background:radial-gradient(circle at 50% 35%,rgba(169,133,255,.13),transparent 67%)}
+.odometer-face{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;position:relative;text-align:center}
+.odometer-label{font-size:8px;letter-spacing:1.5px;color:var(--muted);font-weight:700}
+.odometer-face strong{font:700 39px 'Space Grotesk',sans-serif;letter-spacing:-2px;color:var(--text);line-height:1.1}
+.odometer-face strong small{font-size:17px;color:var(--violet);margin-left:2px}
+.odometer-status{font-size:8px;letter-spacing:1.2px;font-weight:800;color:var(--mint)}
+.odometer-tick{position:absolute;width:3px;height:9px;border-radius:4px;background:var(--text);opacity:.65;z-index:2}
+.tick-start{left:20px;bottom:35px;transform:rotate(-40deg)}.tick-end{right:20px;bottom:35px;transform:rotate(40deg)}
+
+/* Light theme overrides all shared role pages, forms, tables, cards and navigation. */
+:root[data-theme="light"]{--bg:#f3f5fb;--panel:#ffffff;--panel2:#f7f8fd;--line:rgba(35,39,65,.13);--text:#202238;--muted:#696d83;--violet:#7650d8;--violet2:#6842cc;--mint:#168b6d;--blue:#276bc2;--pink:#a34bc2}
+:root[data-theme="light"] body{background:radial-gradient(ellipse at 85% -15%,rgba(119,76,215,.09),transparent 35%),var(--bg);color:var(--text)}
+:root[data-theme="light"] .sidebar{background:rgba(255,255,255,.94);border-color:var(--line)}
+:root[data-theme="light"] .nav-links a{color:#555a72}
+:root[data-theme="light"] .nav-links a span{color:#777b92}
+:root[data-theme="light"] .nav-links a:hover{background:#5f49a40d;color:#25253a}
+:root[data-theme="light"] .nav-links a.active{background:linear-gradient(100deg,#7650d81a,#7650d807);color:#4d32a2;border-color:#7650d82b}
+:root[data-theme="light"] .nav-links a.active span{color:#7650d8}
+:root[data-theme="light"] .topbar{background:rgba(243,245,251,.88)}
+:root[data-theme="light"] .breadcrumb{color:#777b91}
+:root[data-theme="light"] .breadcrumb span{color:#555a72}
+:root[data-theme="light"] .breadcrumb strong{color:#202238}
+:root[data-theme="light"] .date-chip,:root[data-theme="light"] .soft-chip{background:#fff;color:#5c6077}
+:root[data-theme="light"] .stat-card,:root[data-theme="light"] .panel{background:#fff;box-shadow:0 10px 28px rgba(39,42,76,.055)}
+:root[data-theme="light"] .student-hero{background:radial-gradient(ellipse at 85% 50%,#a985ff14,transparent 45%),linear-gradient(120deg,#fff,#f8f6ff)}
+:root[data-theme="light"] .student-hero p,:root[data-theme="light"] .notice-card p,:root[data-theme="light"] .student-notice p{color:#5e6278}
+:root[data-theme="light"] .stat-card>small{color:#5f6379}
+:root[data-theme="light"] .stat-foot,:root[data-theme="light"] .person-cell small,:root[data-theme="light"] .student-notice>small,:root[data-theme="light"] .profile-detail>span:first-child{color:#74788d}
+:root[data-theme="light"] td{color:#444960;border-bottom-color:rgba(35,39,65,.07)}
+:root[data-theme="light"] th{color:#777b90}
+:root[data-theme="light"] .person-cell b{color:#252940}
+:root[data-theme="light"] .subject-progress-head>strong{color:#5940a4}
+:root[data-theme="light"] .subject-progress-head span small{color:#777b90}
+:root[data-theme="light"] .meter,:root[data-theme="light"] .stat-progress{background:#e6e8f1}
+:root[data-theme="light"] .btn-secondary{background:#fff;color:#41455e;border-color:#dfe2ed}
+:root[data-theme="light"] input,:root[data-theme="light"] select,:root[data-theme="light"] textarea{background:#fff;color:#252940;border-color:#d9ddea}
+:root[data-theme="light"] input::placeholder,:root[data-theme="light"] textarea::placeholder{color:#85899d}
+:root[data-theme="light"] .system-card{background:#f7f8fc}
+:root[data-theme="light"] .system-card small,:root[data-theme="light"] .user-mini-info small{color:#74788d}
+:root[data-theme="light"] .icon-button{color:#575c74}
+:root[data-theme="light"] .login-layout{background:#fff;border-color:#e0e3ef;box-shadow:0 25px 80px #30365b12}
+:root[data-theme="light"] .login-story{background:radial-gradient(ellipse at 50% 60%,#6d4dc511,transparent 45%),linear-gradient(145deg,#f5f1ff,#fff 70%)}
+:root[data-theme="light"] .login-story>p,:root[data-theme="light"] .login-heading p{color:#666b82}
+:root[data-theme="light"] .login-preview{background:linear-gradient(140deg,#fff,#f5f2ff 75%);border-color:#b69aff55}
+:root[data-theme="light"] .preview-stat{background:#fff}
+:root[data-theme="light"] .preview-visual{background:radial-gradient(ellipse at center,#a985ff16,transparent 65%),#f6f4fc}
+:root[data-theme="light"] .preview-visual>span{color:#5940a4;text-shadow:none}
+:root[data-theme="light"] .role-option{background:#fff;border-color:#dfe2ed}
+:root[data-theme="light"] .role-option b{color:#252940}
+:root[data-theme="light"] .role-option small{color:#74788d}
+:root[data-theme="light"] .role-option:has(input:checked){background:#f3efff;border-color:#7650d8}
+:root[data-theme="light"] .demo-box{background:#f7f3ff}
+:root[data-theme="light"] .demo-box p,:root[data-theme="light"] .demo-box>small{color:#696d83}
+:root[data-theme="light"] .demo-box code{color:#4d32a2}
+:root[data-theme="light"] .department-card{background:linear-gradient(140deg,#fff,#f8f8fd)}
+:root[data-theme="light"] .department-card-count{color:#696d83}
+:root[data-theme="light"] .auth-theme-toggle{box-shadow:0 4px 16px #2022380b}
+@media(max-width:650px){.theme-toggle{padding:7px 9px;font-size:9px}.top-actions .theme-toggle-label{display:none}.auth-theme-toggle{top:9px;right:10px}.attendance-odometer{width:122px;height:122px;flex-basis:122px}.attendance-odometer:before{inset:7px}.odometer-track{inset:13px}.odometer-face strong{font-size:29px}.odometer-face strong small{font-size:13px}.odometer-label{font-size:6px}.odometer-status{font-size:6px}.tick-start{left:14px;bottom:25px}.tick-end{right:14px;bottom:25px}.student-hero{align-items:center}}
+
+/* Visible sign-out controls for desktop and mobile */
+.logout-button{gap:7px;padding:8px 11px;font-size:10px;border-color:var(--line);color:var(--text);background:var(--panel2);}
+.logout-button span{font-size:15px;line-height:1;}
+.sidebar-logout-form{margin:0;flex-shrink:0;}
+.top-logout-form{margin:0;display:flex;align-items:center;}
+@media(max-width:650px){.sidebar-logout-form{display:none;}.top-logout-form{display:flex;}.top-logout-form .logout-button{padding:7px 9px;font-size:9px;}.topbar{gap:8px}.top-actions{gap:7px}.top-avatar{display:none;}}
